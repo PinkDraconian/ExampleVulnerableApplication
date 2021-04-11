@@ -5,15 +5,9 @@ name: ShiftLeft
 on:
   pull_request:
   workflow_dispatch:
-  push:
-    # We recommend triggering a scan when merging to your default branch as a best practice,
-    # especially if you'd like to compare the results of two scans (e.g., a feature branch against the
-    # default branch)
-    branches:
-      - main
-      - master
+
 jobs:
-  Build:
+  NextGen-Static-Analysis:
     runs-on: windows-latest
 
     steps:
@@ -26,23 +20,54 @@ jobs:
       run: |
         Invoke-WebRequest -Uri 'https://cdn.shiftleft.io/download/sl-latest-windows-x64.zip' -OutFile sl.zip
         Expand-Archive -Path sl.zip -DestinationPath .
-    - name: Build console app
-      run: dotnet build netcoreConsole
-    - name: NextGen Static Analysis
-      run: .\sl analyze --app netcoreConsole --tag branch=$Env:GITHUB_REF --csharp --dotnet-core --cpg netcoreConsole/netcoreConsole/netcoreConsole.csproj
-      env:
-        SHIFTLEFT_ACCESS_TOKEN: ${{ secrets.SHIFTLEFT_ACCESS_TOKEN }}
-    - name: Build web API
+
+    - name: Build web api
       run: dotnet build netcoreWebapi
-    - name: Analyze with NG SAST
-      run: .\sl analyze --app netcoreWebapi --tag branch=$Env:GITHUB_REF --csharp --dotnet-core --cpg netcoreWebapi/netcoreWebapi.csproj
+    - name: Extract branch name
+      shell: bash
+      run: echo "##[set-output name=branch;]$(echo ${GITHUB_REF#refs/heads/})"
+      id: extract_branch
+    - name: Analyze with NextGen Static Analysis
+      run: .\sl analyze --app shiftleft-csharp-demo --tag branch=${{ github.head_ref || steps.extract_branch.outputs.branch }} --csharp --dotnet-core --cpg netcoreWebapi/netcoreWebapi.csproj
       env:
         SHIFTLEFT_ACCESS_TOKEN: ${{ secrets.SHIFTLEFT_ACCESS_TOKEN }}
-    - name: Add msbuild to PATH
-      uses: microsoft/setup-msbuild@v1.0.0
-    - name: Build netfwWebapi
-      run: msbuild netfwWebapi/netfwWebapi.sln
-    - name: Analyze with NG SAST
-      run: .\sl analyze --app netfwWebapi --tag branch=$Env:GITHUB_REF --csharp --cpg netfwWebapi/netfwWebapi.sln
+        
+
+    - name: Create status check
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        URL: https://www.shiftleft.io/findingsSummary/shiftleft-csharp-demo?apps=shiftleft-csharp-demo&isApp=1
+      run: |
+        $params = @{
+            Uri         = "https://api.github.com/repos/$ENV:GITHUB_REPOSITORY/check-runs"
+            Headers     = @{
+              'Authorization' = "Bearer $ENV:GITHUB_TOKEN"
+              'Accept' = 'application/vnd.github.antiope-preview+json'
+            }
+            Method      = 'POST'
+            Body        = "{`"name`": `"ShiftLeft NextGen Static Analysis`", `"head_sha`": `"$ENV:GITHUB_REF`", `"external_id`": `"shiftleft-csharp-demo`", `"details_url`": `"$ENV:URL`", `"status`": `"completed`", `"conclusion`": `"action_required`", `"output`": {`"title`": `"ShiftLeft NextGen Static Analysis Findings`", `"summary`": `"Visit $ENV:URL for the findings`"}}"
+            ContentType = 'application/json'
+        }
+        Invoke-RestMethod @params
+
+  Build-Rules: 
+    runs-on: windows-latest
+    needs: NextGen-Static-Analysis
+    steps:
+    - uses: actions/checkout@v2
+    - name: Download ShiftLeft CLI
+      run: |
+        Invoke-WebRequest -Uri 'https://cdn.shiftleft.io/download/sl-latest-windows-x64.zip' -OutFile sl.zip
+        Expand-Archive -Path sl.zip -DestinationPath .
+    - name: Validate Build Rules
+      run: |
+        .\sl check-analysis --app shiftleft-csharp-demo `
+        --branch "${{ github.head_ref || steps.extract_branch.outputs.branch }}" `
+        --report `
+        --github-pr-number=${{github.event.number}} `
+        --github-pr-user=${{ github.repository_owner }} `
+        --github-pr-repo=${{ github.event.repository.name }} `
+        --github-token=${{ secrets.GITHUB_TOKEN }}
       env:
         SHIFTLEFT_ACCESS_TOKEN: ${{ secrets.SHIFTLEFT_ACCESS_TOKEN }}
+  
